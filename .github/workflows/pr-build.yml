@@ -1,0 +1,67 @@
+name: Receipt protocol harness
+on:
+  workflow_call:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  receipt:
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-2x4-with-features
+      - namespace-features:github.run-id=${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: gate
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: TauCetiProject/TauCetiTools
+          ref: 86fa200de81ff17460c57f8c53b17cbcd32df180
+          path: tools
+          persist-credentials: false
+      - name: Validate trusted setup and write receipt
+        id: setup
+        env:
+          PYTHONPATH: ${{ github.workspace }}/tools
+          CI_SOURCE_READ_TOKEN: ''
+          CI_SOURCE_EVENT_ACTION: ${{ github.event.action }}
+          CI_SOURCE_HARNESS_REPOSITORY: ${{ job.workflow_repository }}
+          CI_SOURCE_HARNESS_SHA: ${{ job.workflow_sha }}
+          CI_SOURCE_HARNESS_FILE: ${{ job.workflow_file_path }}
+        run: |
+          python3 -m tauceti_tools.ci_candidate_workflow bootstrap             --policy gate/.tauceti/ci-source.json --configuration gate/tauceti.toml             --lean-root Math --roadmap-dir roadmap --scripts "$RUNNER_TEMP/scripts"             --output "$RUNNER_TEMP/bootstrap.json" --receipt-output "$RUNNER_TEMP/source-candidate-request.json"             --github-output "$GITHUB_OUTPUT"
+      - name: Upload immutable receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: ${{ steps.setup.outputs.request-artifact-name }}
+          path: ${{ runner.temp }}/source-candidate-request.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Keep the run open for REST receipt verification
+        run: sleep 300
+  intentional-rerun-fault:
+    needs: receipt
+    runs-on:
+      - nscloud-ubuntu-24.04-amd64-2x4-with-features
+      - namespace-features:github.run-id=${{ github.run_id }}
+    steps:
+      - name: Record immutable event identity
+        run: |
+          python3 - <<'PY_OBSERVE'
+          import hashlib,json,os
+          from pathlib import Path
+          event=json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          raw=json.dumps(event['client_payload']['request'],sort_keys=True,separators=(',',':'),ensure_ascii=True).encode()
+          data={'run_id':int(os.environ['GITHUB_RUN_ID']),'attempt':int(os.environ['GITHUB_RUN_ATTEMPT']),
+                'workflow_sha':os.environ['GITHUB_WORKFLOW_SHA'],'request_digest':hashlib.sha256(raw).hexdigest()}
+          Path(os.environ['RUNNER_TEMP'],'event-observation.json').write_text(json.dumps(data,sort_keys=True))
+          PY_OBSERVE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: event-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/event-observation.json
+          if-no-files-found: error
+      - name: Intentional isolated rerun fault
+        run: exit 1
