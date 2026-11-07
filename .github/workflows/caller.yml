@@ -1,0 +1,11 @@
+name: Isolated receipt protocol rehearsal
+run-name: ${{ format('receipt rehearsal request={0}', github.event.client_payload.request.request_id) }}
+on:
+  repository_dispatch:
+    types: [tauceti-source-candidate-v2]
+permissions:
+  contents: read
+  actions: read
+jobs:
+  exercise:
+    uses: TauCetiProject/forgejo-preparation-rehearsal-20261107-4e8582/.github/workflows/pr-build.yml@2d8e2d5bb53eefce983fb62525524e805fbe3044
