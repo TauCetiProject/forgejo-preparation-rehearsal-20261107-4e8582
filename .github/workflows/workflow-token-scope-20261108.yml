@@ -1,0 +1,134 @@
+name: Owned workflow token scope probe
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/workflow-token-scope-20261108.yml]
+  workflow_dispatch:
+  repository_dispatch:
+    types: [tauceti-owned-workflow-token-scope-probe]
+permissions: {}
+jobs:
+  installation-token:
+    if: github.event_name != 'repository_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Verify native repository scope and dispatch one owned event
+        env:
+          PROBE_JOB_TOKEN: ${{ github.token }}
+          PROBE_REPOSITORY_ID: ${{ github.repository_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, secrets, urllib.error, urllib.request
+          from pathlib import Path
+
+          EXPECTED = 1449704128
+          REPOSITORY = 'TauCetiProject/forgejo-preparation-rehearsal-20261107-4e8582'
+          class NoRedirect(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, *_args, **_kwargs): return None
+          opener = urllib.request.build_opener(NoRedirect())
+          token = os.environ['PROBE_JOB_TOKEN']
+          def request(method, path, *, authenticated=True, data=None):
+              headers = {'Accept': 'application/vnd.github+json',
+                         'X-GitHub-Api-Version': '2022-11-28',
+                         'User-Agent': 'tauceti-owned-workflow-token-probe'}
+              if authenticated: headers['Authorization'] = 'Bearer ' + token
+              payload = None if data is None else json.dumps(data).encode()
+              if payload is not None: headers['Content-Type'] = 'application/json'
+              try:
+                  with opener.open(urllib.request.Request('https://api.github.com' + path,
+                                   data=payload, headers=headers, method=method), timeout=20) as response:
+                      raw = response.read(1024 * 1024 + 1)
+                      if len(raw) > 1024 * 1024: return 0, None, False
+                      return response.status, json.loads(raw) if raw else None, 'rel="next"' in response.headers.get('Link', '')
+              except urllib.error.HTTPError as error:
+                  error.close()
+                  return error.code, None, False
+              except (urllib.error.URLError, OSError, ValueError):
+                  return 0, None, False
+
+          assert os.environ['GITHUB_REPOSITORY'] == REPOSITORY
+          assert int(os.environ['PROBE_REPOSITORY_ID']) == EXPECTED
+          assert os.environ['GITHUB_API_URL'] == 'https://api.github.com'
+          report = {'schema': 'tauceti-ci.workflow-token-probe/v1', 'repository_id': EXPECTED,
+                    'run_id': int(os.environ['GITHUB_RUN_ID']), 'attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+                    'caller_sha': os.environ['GITHUB_SHA'], 'event_name': os.environ['GITHUB_EVENT_NAME'],
+                    'request_id': secrets.token_hex(16), 'dispatch_status': 0}
+          status, row, paged = request('GET', '/installation/repositories?per_page=2')
+          report['installation_endpoint_status'] = status
+          resources = row.get('repositories') if isinstance(row, dict) else None
+          exact = (status == 200 and isinstance(resources, list) and len(resources) == 1
+                   and type(row.get('total_count')) is int and row['total_count'] == 1 and not paged
+                   and isinstance(resources[0], dict) and type(resources[0].get('id')) is int
+                   and resources[0]['id'] == EXPECTED and resources[0].get('full_name') == REPOSITORY)
+          report['installation_exact_expected_repository'] = exact
+          anonymous, _, _ = request('GET', '/installation/repositories?per_page=2', authenticated=False)
+          report['anonymous_installation_endpoint_status'] = anonymous
+          repository_status, repository, _ = request('GET', '/repos/' + REPOSITORY)
+          report['repository_endpoint_status'] = repository_status
+          repository_matches = (repository_status == 200 and isinstance(repository, dict)
+                                and type(repository.get('id')) is int and repository['id'] == EXPECTED)
+          report['repository_native_id_matches'] = repository_matches
+          if exact and repository_matches and anonymous in (401, 403):
+              dispatch = {'event_type': 'tauceti-owned-workflow-token-scope-probe', 'client_payload': {
+                  'execution_repository_id': EXPECTED, 'request_id': report['request_id'],
+                  'parent_run_id': report['run_id'], 'parent_attempt': report['attempt'],
+                  'caller_sha': report['caller_sha']}}
+              report['dispatch_status'], _, _ = request('POST', '/repos/' + REPOSITORY + '/dispatches', data=dispatch)
+          output = Path(os.environ['RUNNER_TEMP']) / 'workflow-token-scope.json'
+          output.write_text(json.dumps(report, sort_keys=True))
+          print(json.dumps(report, sort_keys=True))
+          if report['dispatch_status'] != 204:
+              raise SystemExit('owned workflow-token scope/dispatch probe refused')
+          PY
+      - name: Retain non-secret scope evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workflow-token-scope-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workflow-token-scope.json
+          if-no-files-found: error
+          retention-days: 7
+  dispatched-observation:
+    if: github.event_name == 'repository_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    steps:
+      - name: Check execution identity and record the received owned event
+        env:
+          PROBE_REPOSITORY_ID: ${{ github.repository_id }}
+        run: |
+          python3 - <<'PY'
+          import json, os, re
+          from pathlib import Path
+          expected = 1449704128
+          assert int(os.environ['PROBE_REPOSITORY_ID']) == expected
+          event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+          assert event.get('action') == 'tauceti-owned-workflow-token-scope-probe'
+          payload = event['client_payload']
+          assert set(payload) == {'execution_repository_id', 'request_id', 'parent_run_id', 'parent_attempt', 'caller_sha'}
+          assert type(payload['execution_repository_id']) is int and payload['execution_repository_id'] == expected
+          assert isinstance(payload['request_id'], str) and re.fullmatch('[0-9a-f]{32}', payload['request_id'])
+          assert type(payload['parent_run_id']) is int and payload['parent_run_id'] > 0
+          assert type(payload['parent_attempt']) is int and payload['parent_attempt'] > 0
+          assert payload['caller_sha'] == os.environ['GITHUB_SHA']
+          report = {'schema': 'tauceti-ci.workflow-token-probe-event/v1', **payload,
+                    'repository_id': expected, 'run_id': int(os.environ['GITHUB_RUN_ID']),
+                    'attempt': int(os.environ['GITHUB_RUN_ATTEMPT']), 'workflow_sha': os.environ['GITHUB_SHA'],
+                    'sender_login': event.get('sender', {}).get('login'),
+                    'sender_type': event.get('sender', {}).get('type')}
+          (Path(os.environ['RUNNER_TEMP']) / 'workflow-token-event.json').write_text(json.dumps(report, sort_keys=True))
+          print(json.dumps(report, sort_keys=True))
+          PY
+      - name: Retain received-event evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: workflow-token-event-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/workflow-token-event.json
+          if-no-files-found: error
+          retention-days: 7
