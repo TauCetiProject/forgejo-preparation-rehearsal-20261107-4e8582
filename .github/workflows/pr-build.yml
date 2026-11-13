@@ -6,9 +6,7 @@ permissions:
   actions: read
 jobs:
   receipt:
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -43,9 +41,7 @@ jobs:
         run: sleep 300
   intentional-rerun-fault:
     needs: receipt
-    runs-on:
-      - nscloud-ubuntu-24.04-amd64-2x4-with-features
-      - namespace-features:github.run-id=${{ github.run_id }}
+    runs-on: ubuntu-24.04
     steps:
       - name: Record immutable event identity
         run: |
